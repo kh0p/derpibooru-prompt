@@ -2,9 +2,6 @@
   "id": "derpibooru-prompt",
   "name": "Derpibooru Prompt",
   "version": "1.0.0",
-  "minAppVersion": "1.4.0",
   "description": "Syntax highlighting and tag autocomplete for image-gen prompt code blocks, using the Derpibooru tag database.",
-  "author": "Tea",
-  "authorUrl": "",
-  "isDesktopOnly": true
+  "author": "Tea"
 }
