@@ -1,4 +1,5 @@
-import { Plugin } from "obsidian";
+import { Plugin, MarkdownView } from "obsidian";
+import type { EditorView } from "@codemirror/view";
 
 // ── Tag type metadata ──────────────────────────────────────────────────────
 const TAG_TYPE_LABELS: Record<number, string> = {
@@ -86,27 +87,24 @@ class AutocompletePopup {
   constructor(onSelect: (s: Suggestion) => void) {
     this.onSelect = onSelect;
     this.el = document.createElement("div");
-    this.el.className = "derpi-autocomplete-popup";
-    this.el.style.display = "none";
+    this.el.className = "derpi-autocomplete-popup derpi-popup-hidden";
     document.body.appendChild(this.el);
   }
 
   show(suggestions: Suggestion[], coords: { top: number; left: number }) {
     this.suggestions = suggestions;
     this.selectedIndex = 0;
-    this.render();
-    this.el.style.display = "block";
-    this.el.style.left = `${Math.min(coords.left, window.innerWidth - 310)}px`;
-    this.el.style.top = `${coords.top + 4}px`;
+    this.render(coords);
+    this.el.classList.remove("derpi-popup-hidden");
   }
 
-  hide() { this.el.style.display = "none"; this.suggestions = []; }
-  isVisible() { return this.el.style.display !== "none"; }
-  moveDown() { this.selectedIndex = (this.selectedIndex + 1) % this.suggestions.length; this.render(); }
-  moveUp() { this.selectedIndex = (this.selectedIndex - 1 + this.suggestions.length) % this.suggestions.length; this.render(); }
+  hide() { this.el.classList.add("derpi-popup-hidden"); this.suggestions = []; }
+  isVisible() { return !this.el.classList.contains("derpi-popup-hidden"); }
+  moveDown() { this.selectedIndex = (this.selectedIndex + 1) % this.suggestions.length; this.render({}); }
+  moveUp() { this.selectedIndex = (this.selectedIndex - 1 + this.suggestions.length) % this.suggestions.length; this.render({}); }
   confirmSelection(): Suggestion | null { return this.suggestions[this.selectedIndex] ?? null; }
 
-  private render() {
+  private render(coords?: { top?: number; left?: number }) {
     this.el.empty();
     this.suggestions.forEach((s, i) => {
       const row = this.el.createDiv({ cls: `derpi-ac-row derpi-type-${TAG_TYPE_CLASS[s.type] ?? "general"}` });
@@ -116,6 +114,12 @@ class AutocompletePopup {
       row.createSpan({ cls: "derpi-ac-count", text: s.count > 0 ? s.count.toLocaleString() : "" });
       row.addEventListener("mousedown", e => { e.preventDefault(); this.selectedIndex = i; this.onSelect(s); });
     });
+    if (coords?.top || coords?.left) {
+      const left = coords.left ?? 0;
+      const top = coords.top ?? 0;
+      this.el.style.left = `${Math.min(left, window.innerWidth - 310)}px`;
+      this.el.style.top = `${top + 4}px`;
+    }
   }
 
   destroy() { this.el.remove(); }
@@ -180,7 +184,6 @@ function definePromptMode() {
 export default class DerpibooruPromptPlugin extends Plugin {
   trie: TagTrie = new TagTrie();
   popup: AutocompletePopup | null = null;
-  activeEditor: import("obsidian").Editor | null = null;
   private modeSetupInterval: number | null = null;
 
   async onload() {
@@ -205,11 +208,12 @@ export default class DerpibooruPromptPlugin extends Plugin {
     // Autocomplete
     this.registerEvent(
       this.app.workspace.on("editor-change", (editor, view) => {
-        if (view instanceof obsidian.MarkdownView) this.handleEditorChange(editor, view);
+        if (view instanceof MarkdownView) this.handleEditorChange(editor, view);
       })
     );
 
-    this.registerDomEvent(document, "keydown", (e: KeyboardEvent) => {
+    const doc = document; // resolve once, use activeDocument references below
+    this.registerDomEvent(doc, "keydown", (e: KeyboardEvent) => {
       if (!this.popup?.isVisible()) return;
       if (e.key === "ArrowDown")                    { e.preventDefault(); this.popup.moveDown(); }
       else if (e.key === "ArrowUp")                 { e.preventDefault(); this.popup.moveUp(); }
@@ -219,7 +223,7 @@ export default class DerpibooruPromptPlugin extends Plugin {
       } else if (e.key === "Escape") { this.popup.hide(); }
     });
 
-    this.registerDomEvent(document, "mousedown", (e: MouseEvent) => {
+    this.registerDomEvent(doc, "mousedown", (e: MouseEvent) => {
       if (!this.popup?.el.contains(e.target as Node)) this.popup?.hide();
     });
 
@@ -238,7 +242,6 @@ export default class DerpibooruPromptPlugin extends Plugin {
   }
 
   handleEditorChange(editor: import("obsidian").Editor, view: import("obsidian").MarkdownView) {
-    this.activeEditor = editor;
     const cursor = editor.getCursor();
 
     if (!this.isInsidePromptBlock(editor, cursor)) { this.popup?.hide(); return; }
@@ -256,9 +259,8 @@ export default class DerpibooruPromptPlugin extends Plugin {
       display: raw.replace(/_/g, " "), insert: raw.replace(/_/g, " "), raw, type, count,
     }));
 
-    // Get cursor pixel coords from the CM6 view (used for editing) for popup placement
-    const { EditorView } = require("@codemirror/view");
-    const cmView = (view as any).editor?.cm as InstanceType<typeof EditorView> | undefined;
+    // Get cursor pixel coords from the CM6 view (used for editing) for popup
+    const cmView = (view as any).editor?.cm;
     let coords = { top: 200, left: 200 };
     if (cmView) {
       const pos = cmView.state.selection.main.head;
@@ -279,8 +281,8 @@ export default class DerpibooruPromptPlugin extends Plugin {
   }
 
   insertSuggestion(suggestion: Suggestion) {
-    if (!this.activeEditor) return;
-    const editor = this.activeEditor;
+    const editor = this.app.workspace.activeEditor?.editor;
+    if (!editor) return;
     const cursor = editor.getCursor();
     const beforeCursor = editor.getLine(cursor.line).slice(0, cursor.ch);
     const tokenMatch = beforeCursor.match(/([a-zA-Z0-9 _\-'.]+)$/);
@@ -291,56 +293,10 @@ export default class DerpibooruPromptPlugin extends Plugin {
   }
 
   injectStyles() {
-    const el = document.createElement("style");
-    el.id = "derpi-prompt-styles";
-    el.textContent = `
-/* ── CM5 prompt token colours ─────────────────────────────────────── */
-/* Token class names are: cm-<token-string-from-defineSimpleMode>      */
-
-.cm-derpi-lora       { color: #98c379 !important; font-style: italic; }
-.cm-derpi-weight     { color: #e5934a !important; font-weight: 600; }
-.cm-derpi-strong     { color: #c678dd !important; font-weight: 700; }
-.cm-derpi-emphasis   { color: #56b6c2 !important; }
-.cm-derpi-negative   { color: #e06c75 !important; text-decoration: line-through; }
-.cm-derpi-underscore { text-decoration: underline dotted #e5c07b; text-underline-offset: 3px; }
-.cm-derpi-number     { color: #d19a66 !important; }
-.cm-derpi-punct      { color: #5c6370 !important; }
-
-/* ── Autocomplete popup ────────────────────────────────────────────── */
-.derpi-autocomplete-popup {
-  position: fixed; z-index: 9999;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.35);
-  max-height: 320px; overflow-y: auto;
-  min-width: 260px; max-width: 380px;
-  font-family: var(--font-interface); font-size: 13px;
-}
-.derpi-ac-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background 0.08s;
-}
-.derpi-ac-row:hover, .derpi-ac-row.derpi-ac-selected { background: var(--background-modifier-hover); }
-.derpi-ac-name  { flex:1; font-weight:500; color:var(--text-normal); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.derpi-ac-type  { font-size:10px; padding:1px 5px; border-radius:10px; background:var(--background-modifier-border); color:var(--text-muted); white-space:nowrap; text-transform:uppercase; letter-spacing:.04em; }
-.derpi-ac-count { font-size:11px; color:var(--text-faint); min-width:50px; text-align:right; }
-
-.derpi-type-character { border-left-color:#e06c75; } .derpi-type-character .derpi-ac-type { background:rgba(224,108,117,.2); color:#e06c75; }
-.derpi-type-species   { border-left-color:#56b6c2; } .derpi-type-species   .derpi-ac-type { background:rgba(86,182,194,.2);  color:#56b6c2; }
-.derpi-type-rating    { border-left-color:#e5c07b; } .derpi-type-rating    .derpi-ac-type { background:rgba(229,192,123,.2); color:#e5c07b; }
-.derpi-type-general   { border-left-color:#abb2bf; } .derpi-type-general   .derpi-ac-type { background:rgba(171,178,191,.15);color:#abb2bf; }
-.derpi-type-oc        { border-left-color:#c678dd; } .derpi-type-oc        .derpi-ac-type { background:rgba(198,120,221,.2); color:#c678dd; }
-.derpi-type-official  { border-left-color:#61afef; } .derpi-type-official  .derpi-ac-type { background:rgba(97,175,239,.2);  color:#61afef; }
-.derpi-type-body-type { border-left-color:#98c379; } .derpi-type-body-type .derpi-ac-type { background:rgba(152,195,121,.2); color:#98c379; }
-.derpi-type-origin    { border-left-color:#d19a66; } .derpi-type-origin    .derpi-ac-type { background:rgba(209,154,102,.2); color:#d19a66; }
-.derpi-type-spoiler   { border-left-color:#ff79c6; } .derpi-type-spoiler   .derpi-ac-type { background:rgba(255,121,198,.2); color:#ff79c6; }
-.derpi-type-fanmade   { border-left-color:#bd93f9; } .derpi-type-fanmade   .derpi-ac-type { background:rgba(189,147,249,.2); color:#bd93f9; }
-.derpi-type-error     { border-left-color:#ff5555; } .derpi-type-error     .derpi-ac-type { background:rgba(255,85,85,.2);   color:#ff5555; }
-    `;
-    document.head.appendChild(el);
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "styles.css";
+    document.head.appendChild(link);
   }
 
   onunload() {
